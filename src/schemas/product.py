@@ -89,10 +89,17 @@ class SKUUpdateRequest(BaseModel):
 class SKUResponse(BaseModel):
     id: UUID
     product_id: UUID
-    sku_code: str
+    name: str                                    
+    sku_code: Optional[str] = None
+    article: Optional[str] = None                
     price: float
+    discount: int = 0                            
+    cost_price: Optional[int] = None             
     stock_quantity: int
     reserved_quantity: int = 0
+    active_quantity: int = 0                     
+    images: List[Any] = []                       
+    characteristics: List[Any] = []              
     created_at: datetime
     updated_at: datetime
     

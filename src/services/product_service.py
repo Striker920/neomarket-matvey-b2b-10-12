@@ -69,7 +69,7 @@ class ProductService:
             "seller_id": product.seller_id,
             "title": product.title,
             "slug": product.slug,
-            "description": product.description,
+            "description": product_data.description,
             "status": product.status,
             "deleted": product.deleted,
             "blocked": product.blocked,
@@ -79,6 +79,42 @@ class ProductService:
             "skus": [],
             "created_at": product.created_at,
             "updated_at": product.updated_at
+        }
+    
+    def _build_full_sku_response(self, sku: dict, product_id: str) -> dict:
+        """Формирование полного SKU-ответа согласно спецификации b2b/openapi.yaml.
+        
+        Обязательные поля: id, name, price, active_quantity, article, images, characteristics.
+        """
+        stock_qty = sku.get("stock_quantity", 0)
+        reserved_qty = sku.get("reserved_quantity", 0)
+        
+        # Нормализуем images: если есть старое поле 'image' (одиночный URL), 
+        # преобразуем его в массив images
+        images = sku.get("images", [])
+        if not images and sku.get("image"):
+            images = [{
+                "id": str(uuid.uuid4()),
+                "url": sku.get("image"),
+                "ordering": 0
+            }]
+        
+        return {
+            "id": sku.get("id"),
+            "product_id": product_id,
+            "name": sku.get("name", ""),
+            "sku_code": sku.get("sku_code"),
+            "article": sku.get("article"),
+            "price": sku.get("price", 0),
+            "discount": sku.get("discount", 0),
+            "cost_price": sku.get("cost_price"),
+            "stock_quantity": stock_qty,
+            "reserved_quantity": reserved_qty,
+            "active_quantity": stock_qty - reserved_qty,
+            "images": images,
+            "characteristics": sku.get("characteristics", []),
+            "created_at": sku.get("created_at"),
+            "updated_at": sku.get("updated_at"),
         }
     
     def create_sku(self, seller_id: str, sku_data) -> dict:
@@ -111,7 +147,20 @@ class ProductService:
         characteristics = []
         if sku_data.characteristics:
             for ch in sku_data.characteristics:
-                characteristics.append({"name": ch.name, "value": ch.value})
+                characteristics.append({
+                    "id": str(uuid.uuid4()),
+                    "name": ch.name,
+                    "value": ch.value
+                })
+
+        # Формируем images как массив (согласно b2b/openapi.yaml)
+        images = []
+        if getattr(sku_data, "image", None):
+            images = [{
+                "id": str(uuid.uuid4()),
+                "url": sku_data.image,
+                "ordering": 0
+            }]
 
         new_sku = {
             "id": str(uuid.uuid4()),
@@ -120,10 +169,13 @@ class ProductService:
             "price": sku_data.price,
             "cost_price": sku_data.cost_price,
             "discount": sku_data.discount,
-            "image": sku_data.image,
+            "image": sku_data.image,  # для обратной совместимости
+            "images": images,         # <-- ДОБАВЛЕНО: массив изображений
+            "article": None,          # <-- ДОБАВЛЕНО
+            "sku_code": sku_data.name,
+            "stock_quantity": 0,      # <-- ДОБАВЛЕНО
             "active_quantity": 0,
             "reserved_quantity": 0,
-            "sku_code": sku_data.name,
             "characteristics": characteristics,
             "created_at": now_str,
             "updated_at": now_str
@@ -159,7 +211,8 @@ class ProductService:
                 changes={"sku_added": new_sku["id"]}
             )
 
-        return new_sku
+        # Возвращаем ПОЛНЫЙ SKU-ответ согласно спецификации
+        return self._build_full_sku_response(new_sku, str(product.id))
 
     def update_product(self, product_id: str, seller_id: str, update_data: dict) -> Product:
         product = self.db.query(Product).filter(
@@ -224,7 +277,7 @@ class ProductService:
         original_reserved = None
         
         for prod in products:
-            for i, sku in enumerate(prod.skus):
+            for i, sku in enumerate(prod.skus or []):
                 if sku.get("id") == sku_id:
                     found_product = prod
                     sku_index = i
@@ -247,18 +300,45 @@ class ProductService:
         
         sku_to_update = found_product.skus[sku_index]
         
+        # Обновляем поля
         if "sku_code" in update_data:
             sku_to_update["sku_code"] = update_data["sku_code"]
         if "price" in update_data:
             sku_to_update["price"] = update_data["price"]
         if "stock_quantity" in update_data:
             sku_to_update["stock_quantity"] = update_data["stock_quantity"]
+        if "name" in update_data:
+            sku_to_update["name"] = update_data["name"]
+        if "discount" in update_data:
+            sku_to_update["discount"] = update_data["discount"]
+        if "cost_price" in update_data:
+            sku_to_update["cost_price"] = update_data["cost_price"]
+        if "article" in update_data:
+            sku_to_update["article"] = update_data["article"]
+        if "images" in update_data:
+            sku_to_update["images"] = update_data["images"]
+        if "characteristics" in update_data:
+            sku_to_update["characteristics"] = update_data["characteristics"]
         
+        # Сохраняем reserved_quantity и timestamps
         sku_to_update["reserved_quantity"] = original_reserved
         sku_to_update["updated_at"] = datetime.utcnow().isoformat()
         
         if "created_at" not in sku_to_update:
             sku_to_update["created_at"] = datetime.utcnow().isoformat()
+        
+        # Вычисляем active_quantity
+        stock_qty = sku_to_update.get("stock_quantity", 0)
+        reserved_qty = sku_to_update.get("reserved_quantity", 0)
+        sku_to_update["active_quantity"] = stock_qty - reserved_qty
+        
+        # Инициализируем images если отсутствует
+        if "images" not in sku_to_update and sku_to_update.get("image"):
+            sku_to_update["images"] = [{
+                "id": str(uuid.uuid4()),
+                "url": sku_to_update.get("image"),
+                "ordering": 0
+            }]
         
         flag_modified(found_product, "skus")
         
@@ -269,8 +349,11 @@ class ProductService:
         
         self.db.commit()
         
-        result_sku = found_product.skus[sku_index].copy()
-        result_sku["product_id"] = str(found_product.id)
+        # Формируем ПОЛНЫЙ ответ согласно спецификации b2b/openapi.yaml
+        result_sku = self._build_full_sku_response(
+            found_product.skus[sku_index],
+            str(found_product.id)
+        )
         
         send_edited_event(
             product_id=str(found_product.id),
@@ -486,13 +569,13 @@ class ProductService:
         }
 
     def _enrich_skus_for_seller(self, skus: list) -> list:
-        """Добавляем cost_price и reserved_quantity для продавца"""
+        """Обогащаем SKU всеми полями согласно спецификации b2b/openapi.yaml"""
         enriched = []
-        for sku in skus:
-            enriched_sku = dict(sku)  # копируем
-            enriched_sku["cost_price"] = sku.get("cost_price", 0)
-            enriched_sku["reserved_quantity"] = sku.get("reserved_quantity", 0)
-            enriched.append(enriched_sku)
+        for sku in (skus or []):
+            enriched.append(self._build_full_sku_response(
+                sku,
+                sku.get("product_id", "")
+            ))
         return enriched
 
     def get_catalog_products(
