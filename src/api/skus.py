@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from uuid import UUID
 
@@ -46,7 +47,7 @@ def update_sku(
     return updated_sku
 
 
-@router.delete("/{sku_id}")
+@router.delete("/{sku_id}", status_code=204)
 def delete_sku(
     sku_id: UUID,
     seller_id: UUID = Depends(get_current_seller_id),
@@ -63,9 +64,10 @@ def delete_sku(
             "CONFLICT": 409,
         }.get(result["code"], 400)
 
-        raise HTTPException(
+        # <-- ИЗМЕНЕНО: возвращаем JSONResponse напрямую, а не HTTPException
+        return JSONResponse(
             status_code=status_code,
-            detail={"code": result["code"], "message": result["message"]}
+            content={"code": result["code"], "message": result["message"]}
         )
 
-    return {"ok": True}
+    return Response(status_code=204)

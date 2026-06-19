@@ -9,7 +9,7 @@ from src.config import settings
 class TestDeleteSKU:
 
     def test_delete_sku_succeeds(self, client, db_session, valid_jwt_with_fixed_id):
-        """Happy path: SKU deleted successfully"""
+        """Happy path: SKU deleted successfully, returns 204 No Content"""
         token, seller_id = valid_jwt_with_fixed_id
         sku_id = str(uuid4())
 
@@ -38,8 +38,8 @@ class TestDeleteSKU:
             headers={"Authorization": f"Bearer {token}"}
         )
 
-        assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        assert response.status_code == 204
+        assert response.content == b""
 
         db_session.refresh(product)
         assert len(product.skus) == 1
@@ -75,6 +75,7 @@ class TestDeleteSKU:
         )
 
         assert response.status_code == 409
+        # <-- ИЗМЕНЕНО: response.json()["code"] вместо response.json()["detail"]["code"]
         assert response.json()["code"] == "CONFLICT"
 
     def test_last_sku_on_moderation_transitions_product_to_created(self, client, db_session, valid_jwt_with_fixed_id):
@@ -107,7 +108,7 @@ class TestDeleteSKU:
                 headers={"Authorization": f"Bearer {token}"}
             )
 
-        assert response.status_code == 200
+        assert response.status_code == 204
         db_session.refresh(product)
         assert product.status == Product.Status.CREATED
         assert len(product.skus) == 0
@@ -143,10 +144,11 @@ class TestDeleteSKU:
         )
 
         assert response.status_code == 403
+        # <-- ИЗМЕНЕНО: response.json()["code"] вместо response.json()["detail"]["code"]
         assert response.json()["code"] == "FORBIDDEN"
 
     def test_sku_out_of_stock_event_on_moderated_product(self, client, db_session, valid_jwt_with_fixed_id):
-        """active_quantity > 0 + MODERATED → SKU_OUT_OF_STOCK event to B2C"""
+        """active_quantity > 0 + MODERATED → SKU_OUT_OF_STOCK event to B2C with available_quantity"""
         token, seller_id = valid_jwt_with_fixed_id
         sku_id = str(uuid4())
 
@@ -176,10 +178,15 @@ class TestDeleteSKU:
                 headers={"Authorization": f"Bearer {token}"}
             )
 
-        assert response.status_code == 200
+        assert response.status_code == 204
         mock_b2c.assert_called_once()
         call_args = mock_b2c.call_args
         assert call_args[1]["event_type"] == "SKU_OUT_OF_STOCK"
+        
+        payload = call_args[1]["payload"]
+        assert payload["sku_id"] == sku_id
+        assert payload["product_id"] == str(product.id)
+        assert payload["available_quantity"] == 5
 
     def test_delete_others_sku_returns_403(self, client, db_session, valid_jwt_with_fixed_id):
         """SKU belongs to another seller → 403"""
@@ -211,6 +218,7 @@ class TestDeleteSKU:
         )
 
         assert response.status_code == 403
+        # <-- ИЗМЕНЕНО: response.json()["code"] вместо response.json()["detail"]["code"]
         assert response.json()["code"] == "NOT_OWNER"
 
     def test_delete_nonexistent_sku_returns_404(self, client, db_session, valid_jwt_with_fixed_id):
@@ -223,4 +231,5 @@ class TestDeleteSKU:
         )
 
         assert response.status_code == 404
+        # <-- ИЗМЕНЕНО: response.json()["code"] вместо response.json()["detail"]["code"]
         assert response.json()["code"] == "NOT_FOUND"

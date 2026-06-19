@@ -82,15 +82,10 @@ class ProductService:
         }
     
     def _build_full_sku_response(self, sku: dict, product_id: str) -> dict:
-        """Формирование полного SKU-ответа согласно спецификации b2b/openapi.yaml.
-        
-        Обязательные поля: id, name, price, active_quantity, article, images, characteristics.
-        """
+        """Формирование полного SKU-ответа согласно спецификации b2b/openapi.yaml."""
         stock_qty = sku.get("stock_quantity", 0)
         reserved_qty = sku.get("reserved_quantity", 0)
         
-        # Нормализуем images: если есть старое поле 'image' (одиночный URL), 
-        # преобразуем его в массив images
         images = sku.get("images", [])
         if not images and sku.get("image"):
             images = [{
@@ -153,7 +148,6 @@ class ProductService:
                     "value": ch.value
                 })
 
-        # Формируем images как массив (согласно b2b/openapi.yaml)
         images = []
         if getattr(sku_data, "image", None):
             images = [{
@@ -169,11 +163,11 @@ class ProductService:
             "price": sku_data.price,
             "cost_price": sku_data.cost_price,
             "discount": sku_data.discount,
-            "image": sku_data.image,  # для обратной совместимости
-            "images": images,         # <-- ДОБАВЛЕНО: массив изображений
-            "article": None,          # <-- ДОБАВЛЕНО
+            "image": sku_data.image,
+            "images": images,
+            "article": None,
             "sku_code": sku_data.name,
-            "stock_quantity": 0,      # <-- ДОБАВЛЕНО
+            "stock_quantity": 0,
             "active_quantity": 0,
             "reserved_quantity": 0,
             "characteristics": characteristics,
@@ -211,7 +205,6 @@ class ProductService:
                 changes={"sku_added": new_sku["id"]}
             )
 
-        # Возвращаем ПОЛНЫЙ SKU-ответ согласно спецификации
         return self._build_full_sku_response(new_sku, str(product.id))
 
     def update_product(self, product_id: str, seller_id: str, update_data: dict) -> Product:
@@ -300,7 +293,6 @@ class ProductService:
         
         sku_to_update = found_product.skus[sku_index]
         
-        # Обновляем поля
         if "sku_code" in update_data:
             sku_to_update["sku_code"] = update_data["sku_code"]
         if "price" in update_data:
@@ -320,19 +312,16 @@ class ProductService:
         if "characteristics" in update_data:
             sku_to_update["characteristics"] = update_data["characteristics"]
         
-        # Сохраняем reserved_quantity и timestamps
         sku_to_update["reserved_quantity"] = original_reserved
         sku_to_update["updated_at"] = datetime.utcnow().isoformat()
         
         if "created_at" not in sku_to_update:
             sku_to_update["created_at"] = datetime.utcnow().isoformat()
         
-        # Вычисляем active_quantity
         stock_qty = sku_to_update.get("stock_quantity", 0)
         reserved_qty = sku_to_update.get("reserved_quantity", 0)
         sku_to_update["active_quantity"] = stock_qty - reserved_qty
         
-        # Инициализируем images если отсутствует
         if "images" not in sku_to_update and sku_to_update.get("image"):
             sku_to_update["images"] = [{
                 "id": str(uuid.uuid4()),
@@ -349,7 +338,6 @@ class ProductService:
         
         self.db.commit()
         
-        # Формируем ПОЛНЫЙ ответ согласно спецификации b2b/openapi.yaml
         result_sku = self._build_full_sku_response(
             found_product.skus[sku_index],
             str(found_product.id)
@@ -362,6 +350,82 @@ class ProductService:
         )
         
         return result_sku
+    
+    def delete_sku(self, sku_id: str, seller_id: str) -> dict:
+        """Delete SKU with guardrails: HARD_BLOCKED check, reserved_quantity check, side effects.
+        
+        Порядок проверок критичен:
+        1. NOT_FOUND — SKU существует?
+        2. NOT_OWNER — принадлежит продавцу?
+        3. HARD_BLOCKED → 403
+        4. reserved_quantity > 0 → 409
+        5. Удаление + side-эффекты
+        """
+        from src.services.event_service import send_deleted_event, send_event_to_b2c
+
+        products = self.db.query(Product).filter(
+            Product.deleted == False
+        ).all()
+
+        found_product = None
+        sku_index = None
+
+        for product in products:
+            for i, sku in enumerate(product.skus or []):
+                if str(sku.get("id")) == sku_id:
+                    found_product = product
+                    sku_index = i
+                    break
+            if found_product:
+                break
+
+        # Guardrail 1: NOT_FOUND
+        if not found_product:
+            return {"code": "NOT_FOUND", "message": "SKU not found"}
+
+        # Guardrail 2: NOT_OWNER
+        if found_product.seller_id != seller_id:
+            return {"code": "NOT_OWNER", "message": "SKU does not belong to the authenticated seller"}
+
+        # Guardrail 3: HARD_BLOCKED
+        if found_product.status == Product.Status.HARD_BLOCKED:
+            return {"code": "FORBIDDEN", "message": "Cannot delete SKU of hard-blocked product"}
+
+        sku = found_product.skus[sku_index]
+        
+        # Guardrail 4: reserved_quantity > 0
+        if sku.get("reserved_quantity", 0) > 0:
+            return {"code": "CONFLICT", "message": "Cannot delete SKU with active reserves"}
+
+        # Сохраняем значения для side-эффектов
+        active_qty = sku.get("active_quantity", 0)
+        product_was_on_moderation = found_product.status == Product.Status.ON_MODERATION
+        product_is_moderated = found_product.status == Product.Status.MODERATED
+
+        # Удаляем SKU
+        found_product.skus.pop(sku_index)
+        flag_modified(found_product, "skus")
+
+        # Side-effect 1: последний SKU + ON_MODERATION → CREATED + DELETED
+        if len(found_product.skus) == 0 and product_was_on_moderation:
+            found_product.status = Product.Status.CREATED
+            found_product.updated_at = datetime.utcnow()
+            send_deleted_event(product_id=found_product.id, seller_id=seller_id)
+
+        # Side-effect 2: active_quantity > 0 + MODERATED → SKU_OUT_OF_STOCK
+        if active_qty > 0 and product_is_moderated:
+            send_event_to_b2c(
+                event_type="SKU_OUT_OF_STOCK",
+                payload={
+                    "sku_id": sku_id,
+                    "product_id": str(found_product.id),
+                    "available_quantity": active_qty,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+
+        self.db.commit()
+        return {"ok": True}
     
     def delete_product(self, product_id: str, seller_id: str) -> None:
         from src.services.event_service import send_deleted_event, send_product_deleted_to_b2c
@@ -389,64 +453,6 @@ class ProductService:
         
         send_deleted_event(product_id=product.id, seller_id=seller_id)
         send_product_deleted_to_b2c(product_id=product.id, sku_ids=sku_ids)
-
-    def delete_sku(self, sku_id: str, seller_id: str) -> dict:
-        """Delete SKU with guardrails: HARD_BLOCKED check, reserved_quantity check, side effects."""
-        from src.services.event_service import send_deleted_event, send_event_to_b2c
-
-        products = self.db.query(Product).filter(
-            Product.deleted == False
-        ).all()
-
-        found_product = None
-        sku_index = None
-
-        for product in products:
-            for i, sku in enumerate(product.skus or []):
-                if str(sku.get("id")) == sku_id:
-                    found_product = product
-                    sku_index = i
-                    break
-            if found_product:
-                break
-
-        if not found_product:
-            return {"code": "NOT_FOUND", "message": "SKU not found"}
-
-        if found_product.seller_id != seller_id:
-            return {"code": "NOT_OWNER", "message": "SKU does not belong to the authenticated seller"}
-
-        if found_product.status == Product.Status.HARD_BLOCKED:
-            return {"code": "FORBIDDEN", "message": "Cannot delete SKU of hard-blocked product"}
-
-        sku = found_product.skus[sku_index]
-        if sku.get("reserved_quantity", 0) > 0:
-            return {"code": "CONFLICT", "message": "Cannot delete SKU with active reserves"}
-
-        active_qty = sku.get("active_quantity", 0)
-        product_was_on_moderation = found_product.status == Product.Status.ON_MODERATION
-        product_is_moderated = found_product.status == Product.Status.MODERATED
-
-        found_product.skus.pop(sku_index)
-        flag_modified(found_product, "skus")
-
-        if len(found_product.skus) == 0 and product_was_on_moderation:
-            found_product.status = Product.Status.CREATED
-            found_product.updated_at = datetime.utcnow()
-            send_deleted_event(product_id=found_product.id, seller_id=seller_id)
-
-        if active_qty > 0 and product_is_moderated:
-            send_event_to_b2c(
-                event_type="SKU_OUT_OF_STOCK",
-                payload={
-                    "sku_id": sku_id,
-                    "product_id": str(found_product.id),
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            )
-
-        self.db.commit()
-        return {"ok": True}
 
     def get_seller_products(self, seller_id: str, skip: int = 0, limit: int = 100) -> list[Product]:
         return self.db.query(Product).filter(
@@ -501,13 +507,11 @@ class ProductService:
         if not product:
             return None
         
-        # B2C режим: только опубликованные товары, без cost_price
         if is_b2c_mode:
             if product.status != Product.Status.MODERATED or product.deleted:
                 return None
             return self._format_for_b2c(product)
         
-        # Seller режим: проверяем владельца
         if product.seller_id != seller_id:
             return None
         
@@ -534,7 +538,6 @@ class ProductService:
             "updated_at": product.updated_at
         }
         
-        # Добавляем причину блокировки, если статус BLOCKED
         if product.status == Product.Status.BLOCKED and product.blocked:
             blocking_info = self._get_blocking_info(product.id)
             if blocking_info:

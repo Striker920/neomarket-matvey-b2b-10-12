@@ -37,12 +37,12 @@ def send_deleted_event(product_id: str, seller_id: str) -> None:
     try:
         with httpx.Client() as client:
             response = client.post(
-                f"{settings.MODERATION_SERVICE_URL}/api/v1/b2b/events",  # ✅ исправлено
+                f"{settings.MODERATION_SERVICE_URL}/api/v1/b2b/events",
                 json={
-                    "event_type": "PRODUCT_DELETED",  # ✅ исправлено
-                    "idempotency_key": str(uuid.uuid4()),  # ✅ добавлено
-                    "occurred_at": datetime.utcnow().isoformat(),  # ✅ добавлено
-                    "payload": {  # ✅ обёрнуто в payload
+                    "event_type": "PRODUCT_DELETED",
+                    "idempotency_key": str(uuid.uuid4()),
+                    "occurred_at": datetime.utcnow().isoformat(),
+                    "payload": {
                         "product_id": str(product_id)
                     }
                 },
@@ -59,12 +59,12 @@ def send_product_deleted_to_b2c(product_id: str, sku_ids: list) -> None:
     try:
         with httpx.Client() as client:
             response = client.post(
-                f"{settings.B2C_SERVICE_URL}/api/v1/b2b/events",  # ✅ исправлен путь
+                f"{settings.B2C_SERVICE_URL}/api/v1/b2b/events",
                 json={
-                    "event_type": "PRODUCT_DELETED",  # ✅ добавлен event_type
-                    "idempotency_key": str(uuid.uuid4()),  # ✅ добавлено
-                    "occurred_at": datetime.utcnow().isoformat(),  # ✅ добавлено
-                    "payload": {  # ✅ обёрнуто в payload
+                    "event_type": "PRODUCT_DELETED",
+                    "idempotency_key": str(uuid.uuid4()),
+                    "occurred_at": datetime.utcnow().isoformat(),
+                    "payload": {
                         "product_id": str(product_id),
                         "sku_ids": sku_ids
                     }
@@ -96,17 +96,20 @@ def send_created_event(product_id: str, seller_id: str, sku: dict) -> None:
                 timeout=5.0
             )
             response.raise_for_status()
-            logger.info("product_created_event_sent", product_id=product_id, sku_code=sku.get("sku_code"))
+            logger.info("product_created_event_sent", product_id=product_id)
     except Exception as e:
         logger.error("failed_to_send_created_event", product_id=product_id, error=str(e))
 
 
 def send_event_to_b2c(event_type: str, payload: dict) -> None:
-    """Generic event sender to B2C service"""
+    """Generic event sender to B2C service.
+    
+    Путь: POST /api/v1/b2b/events (согласно b2c openapi)
+    """
     try:
         with httpx.Client() as client:
             response = client.post(
-                f"{settings.B2C_SERVICE_URL}/api/v1/events",
+                f"{settings.B2C_SERVICE_URL}/api/v1/b2b/events",  # <-- ИСПРАВЛЕНО: было /api/v1/events
                 json={
                     "event_type": event_type,
                     "idempotency_key": str(uuid.uuid4()),
