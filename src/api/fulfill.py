@@ -7,7 +7,7 @@ from src.config import settings
 from src.schemas.fulfill import FulfillRequest
 from src.services.fulfill_service import FulfillService
 
-router = APIRouter(prefix="/api/v1", tags=["Fulfill"])
+router = APIRouter(prefix="/api/v1/inventory", tags=["B2B: Fulfill"])
 
 
 def verify_service_key(x_service_key: Optional[str] = Header(None)):
